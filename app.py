@@ -92,16 +92,8 @@ st.markdown("""<style>
     #MainMenu, header, footer, .stDeployButton, [data-testid="stToolbar"] {display:none !important;}
     .stMainBlockContainer {padding:0 !important; max-width:100% !important;}
     iframe {border:none !important;}
-    /* Float refresh button top-left over the DAG */
-    .stElementContainer:has(button[kind="secondary"][data-testid="stBaseButton-secondary"]) {
-        position:fixed !important; top:8px; left:12px; z-index:9999;
-    }
-</style>""", unsafe_allow_html=True)
 
-# --- Refresh ODBC button (outside iframe, always works) ---
-if st.button("↻ Refresh ODBC", key="refresh_odbc"):
-    st.cache_data.clear()
-    st.rerun()
+</style>""", unsafe_allow_html=True)
 
 # --- Config from secrets ---
 FABRIC_SERVER = st.secrets.get("FABRIC_SERVER", "")
