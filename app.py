@@ -1,17 +1,19 @@
 """
 Data Lineage – Streamlit App
 =============================
-Connects to Fabric SQL endpoint via pytds (pure Python, no ODBC driver needed).
+Connects to Fabric SQL endpoint via pyodbc (ODBC Driver 17/18) + Azure AD token.
 Renders the React DAG visualisation in an iframe via st.components.
 
 Deploy on Streamlit Cloud:
   1. Push to GitHub
   2. Create app on share.streamlit.io
-  3. Set secrets: FABRIC_SERVER, FABRIC_DATABASE, AZURE_CLIENT_ID,
-     AZURE_TENANT_ID, AZURE_CLIENT_SECRET (or use DefaultAzureCredential)
+  3. Add packages.txt with: unixodbc-dev
+  4. Set secrets: FABRIC_SERVER, FABRIC_DATABASE, AZURE_CLIENT_ID,
+     AZURE_TENANT_ID, AZURE_CLIENT_SECRET
 """
 
 import json
+import struct
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
@@ -28,14 +30,25 @@ st.markdown("""<style>
 # --- Config from secrets ---
 FABRIC_SERVER = st.secrets.get("FABRIC_SERVER", "")
 FABRIC_DATABASE = st.secrets.get("FABRIC_DATABASE", "")
+SQL_COPT_SS_ACCESS_TOKEN = 1256
+
+# --- Detect ODBC Driver ---
+ODBC_DRIVER = None
+try:
+    import pyodbc
+    for drv in ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"]:
+        if drv in pyodbc.drivers():
+            ODBC_DRIVER = drv
+            break
+except Exception:
+    pass
 
 
 def get_connection():
-    """Connect to Fabric SQL endpoint using pytds + Azure AD token."""
+    """Connect to Fabric SQL endpoint using pyodbc + Azure AD token."""
     from azure.identity import DefaultAzureCredential, ClientSecretCredential
 
-    # Use service principal if secrets are set, otherwise DefaultAzureCredential
-    if st.secrets.get("AZURE_CLIENT_ID") and st.secrets.get("AZURE_CLIENT_SECRET"):
+    if st.secrets.get("AZURE_CLIENT_ID", "").strip() and st.secrets.get("AZURE_CLIENT_SECRET", "").strip():
         credential = ClientSecretCredential(
             tenant_id=st.secrets["AZURE_TENANT_ID"],
             client_id=st.secrets["AZURE_CLIENT_ID"],
@@ -45,14 +58,17 @@ def get_connection():
         credential = DefaultAzureCredential()
 
     token = credential.get_token("https://database.windows.net/.default").token
+    token_bytes = token.encode("utf-16-le")
+    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
 
-    import pytds
-    return pytds.connect(
-        dsn=FABRIC_SERVER,
-        port=1433,
-        database=FABRIC_DATABASE,
-        auth=pytds.login.AzureAuth(token),
+    conn_str = (
+        f"DRIVER={{{ODBC_DRIVER}}};"
+        f"Server={FABRIC_SERVER},1433;"
+        f"Database={FABRIC_DATABASE};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate=no"
     )
+    return pyodbc.connect(conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct})
 
 
 @st.cache_data(ttl=300)
@@ -110,7 +126,7 @@ html_content = html_path.read_text(encoding="utf-8")
 
 # --- Try to fetch live data from Fabric ---
 lineage_data = None
-if FABRIC_SERVER and FABRIC_DATABASE:
+if FABRIC_SERVER and FABRIC_DATABASE and ODBC_DRIVER:
     try:
         lineage_data = fetch_lineage()
     except Exception as e:
@@ -118,7 +134,6 @@ if FABRIC_SERVER and FABRIC_DATABASE:
 
 # --- Inject data into HTML ---
 if lineage_data:
-    inject_script = f"<script>window.__LINEAGE_API_DATA__ = {json.dumps(lineage_data)};</script>"
     html_content = html_content.replace(
         "window.__LINEAGE_API_DATA__ = null;",
         f"window.__LINEAGE_API_DATA__ = {json.dumps(lineage_data)};",
