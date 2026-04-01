@@ -14,11 +14,45 @@ Deploy on Streamlit Cloud:
 
 import json
 import struct
+import hmac
 import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
 
 st.set_page_config(page_title="Data Lineage", layout="wide", initial_sidebar_state="collapsed")
+
+
+# --- Login ---
+def check_login():
+    """Show login form and verify credentials from secrets."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    with st.container():
+        st.markdown("<h2 style='text-align:center; margin-top:15vh;'>🔐 Data Lineage Login</h2>", unsafe_allow_html=True)
+        _, col2, _ = st.columns([1, 1, 1])
+        with col2:
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Login", use_container_width=True)
+
+            if submitted:
+                correct_email = st.secrets.get("LOGIN_EMAIL", "")
+                correct_password = st.secrets.get("LOGIN_PASSWORD", "")
+                if (
+                    hmac.compare_digest(email.strip(), correct_email)
+                    and hmac.compare_digest(password, correct_password)
+                ):
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Email hoặc mật khẩu không đúng.")
+    return False
+
+
+if not check_login():
+    st.stop()
 
 # Hide Streamlit chrome for full-screen experience
 st.markdown("""<style>
