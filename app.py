@@ -94,6 +94,11 @@ st.markdown("""<style>
     iframe {border:none !important;}
 </style>""", unsafe_allow_html=True)
 
+# --- Handle refresh request (clear cache) ---
+if st.query_params.get("refresh"):
+    st.cache_data.clear()
+    st.query_params.clear()
+
 # --- Config from secrets ---
 FABRIC_SERVER = st.secrets.get("FABRIC_SERVER", "")
 FABRIC_DATABASE = st.secrets.get("FABRIC_DATABASE", "")

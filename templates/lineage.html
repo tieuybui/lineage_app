@@ -416,38 +416,31 @@ function App() {
   const [loadErr,setLoadErr]=useState(null);
   const [liveStatus,setLiveStatus]=useState("loading"); /* loading | connected | fallback | error */
 
-  /* Load lineage data: injected JSON > /api/lineage > static fallback */
-  const fetchLive = useCallback(()=>{
-    setLiveStatus("loading");
-    /* Priority 1: data injected by Streamlit */
+  /* Load lineage data from injected JSON */
+  const loadInjectedData = useCallback(()=>{
     if(window.__LINEAGE_API_DATA__&&window.__LINEAGE_API_DATA__.nodes&&window.__LINEAGE_API_DATA__.nodes.length>0){
-      setGraph(apiJsonToGraph(window.__LINEAGE_API_DATA__));setLoadErr(null);setLiveStatus("connected");return;
-    }
-    /* Priority 2: /api/lineage (Flask backend) */
-    fetch("/api/lineage").then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}).then(data=>{
-      if(data.nodes&&data.nodes.length>0){
-        setGraph(apiJsonToGraph(data));setLoadErr(null);setLiveStatus("connected");
-      } else {
-        setLiveStatus("fallback"); throw new Error("empty");
-      }
-    }).catch(e=>{
+      setGraph(apiJsonToGraph(window.__LINEAGE_API_DATA__));setLoadErr(null);setLiveStatus("connected");
+    } else {
       /* Fallback: try static data or result.txt */
       if(window.__LINEAGE_DATA__){
         const nb=parseLineageText(window.__LINEAGE_DATA__);
         if(Object.keys(nb).length>0){setGraph(lineageToGraph(nb));setLiveStatus("fallback");return;}
       }
-      fetch("result.txt").then(r=>{if(!r.ok)throw new Error(r.status);return r.text();}).then(text=>{
-        const nb=parseLineageText(text);
-        if(Object.keys(nb).length>0){setGraph(lineageToGraph(nb));setLiveStatus("fallback");}
-        else {setLoadErr("No data available.");setLiveStatus("error");}
-      }).catch(()=>{
-        setLoadErr("Failed to load. Use Import to paste data.");
-        setLiveStatus("error");
-      });
-    });
+      setLoadErr("No data available. Use Import to paste data.");setLiveStatus("error");
+    }
   },[]);
 
-  useEffect(()=>{fetchLive();},[fetchLive]);
+  /* Refresh: reload the Streamlit page to re-fetch from Fabric */
+  const fetchLive = useCallback(()=>{
+    setLiveStatus("loading");
+    try {
+      var u = new URL(window.parent.location.href);
+      u.searchParams.set("refresh", Date.now());
+      window.parent.location.href = u.toString();
+    } catch(e) { loadInjectedData(); }
+  },[loadInjectedData]);
+
+  useEffect(()=>{loadInjectedData();},[loadInjectedData]);
   const [showImp,setShowImp]=useState(false);
   const [impTxt,setImpTxt]=useState("");
   const [search,setSearch]=useState("");
