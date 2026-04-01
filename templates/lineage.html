@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Data Lineage Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace; background: #0a0f1a; color: #cbd5e1; overflow: hidden; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #0a0f1a; }
+  ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+  a { color: #0ea5e9; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script>
+window.__LINEAGE_API_DATA__ = null; /* injected by Streamlit (JSON) */
+window.__LINEAGE_DATA__ = null; /* fallback text format */
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback, useMemo } = React;
+
+/* ─── Parsing ─── */
+function parseLineageText(text) {
+  const lines = text.trim().split("\n").filter(l => l.trim());
+  const nbMap = {};
+  let current = null;
+  let inSection = "lineage"; // lineage | links | summary
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("===")) continue;
+    if (/^TABLE LINEAGE:/i.test(trimmed)) { inSection = "lineage"; continue; }
+    if (/^CROSS-NOTEBOOK LINEAGE/i.test(trimmed)) { inSection = "links"; continue; }
+    if (/^SUMMARY$/i.test(trimmed)) { inSection = "summary"; continue; }
+    if (inSection === "summary" || inSection === "links") continue;
+    // Match notebook name: "nb_xxx [layer]" or "nb_xxx" on its own line
+    const nbMatch = trimmed.match(/^(?:\u{1F4D3}\s*)?(nb_\w+)\s*(?:\[\w+\])?\s*:?\s*$/u);
+    if (nbMatch && !trimmed.match(/^(WRITES|READS)\s/i)) {
+      current = nbMatch[1]; nbMap[current] = { reads: [], writes: [] }; continue;
+    }
+    if (!current && trimmed.match(/^nb_\w+/)) {
+      const nm = trimmed.match(/^(nb_\w+)/); current = nm[1]; nbMap[current] = { reads: [], writes: [] };
+    }
+    if (!current) continue;
+    for (const m of trimmed.matchAll(/WRITES?\s*(?:->|→)\s*(\S+)/gi)) nbMap[current].writes.push(m[1].replace(/^dbo\./, ""));
+    // READS: skip [external] prefix, capture the actual table/source name
+    for (const m of trimmed.matchAll(/READS?\s*(?:<-|←)\s*(?:\[external\]\s+)?(\S+)/gi)) nbMap[current].reads.push(m[1].replace(/^dbo\./, ""));
+  }
+  return nbMap;
+}
+
+function getNodeType(name) {
+  const n = name.toLowerCase();
+  if (n.startsWith("brz_") || n.startsWith("brz2_")) return "brz";
+  if (n.startsWith("ref_")) return "ref";
+  if (n.startsWith("slv_")) return "slv";
+  if (n.startsWith("gld_")) return "gld";
+  if (n.startsWith("dq_")) return "dq";
+  return "other";
+}
+
+const TYPE_CONFIG = {
+  brz:   { color: "#22c55e", label: "BRZ",   icon: "◇" },
+  ref:   { color: "#14b8a6", label: "REF",   icon: "◎" },
+  slv:   { color: "#3b82f6", label: "SLV",   icon: "◆" },
+  gld:   { color: "#f59e0b", label: "GLD",   icon: "★" },
+  dq:    { color: "#ef4444", label: "DQ",    icon: "●" },
+  other: { color: "#94a3b8", label: "Raw",   icon: "○" },
+};
+
+function lineageToGraph(nbMap) {
+  const nodes = new Map(), edges = [];
+  const ensure = (name) => {
+    const clean = name.replace(/^dbo\./, "");
+    if (!nodes.has(clean)) nodes.set(clean, { id: clean, name: clean, type: getNodeType(clean) });
+    return clean;
+  };
+  for (const [, info] of Object.entries(nbMap)) {
+    for (const w of info.writes) { const wId = ensure(w); for (const r of info.reads) { const rId = ensure(r); if (rId !== wId) edges.push({ from: rId, to: wId }); } }
+  }
+  const s = new Set();
+  return { nodes: Array.from(nodes.values()), edges: edges.filter(e => { const k = e.from+"→"+e.to; if (s.has(k)) return false; s.add(k); return true; }) };
+}
+
+/* ─── Convert /api/lineage JSON → graph format ─── */
+function apiJsonToGraph(data) {
+  const nodes = new Map(), edges = [];
+  const ensure = (id, layer) => {
+    const clean = id.replace(/^dbo\./, '');
+    if (!nodes.has(clean)) nodes.set(clean, { id: clean, name: clean, type: getNodeType(clean) });
+    return clean;
+  };
+  for (const n of data.nodes) {
+    const id = n.id.replace(/^dbo\./, '');
+    const type = n.layer === 'external' ? 'other' : getNodeType(id);
+    nodes.set(id, { id, name: id, type, status: n.status, load_type: n.load_type, last_load_date: n.last_load_date, rows_loaded: n.rows_loaded });
+  }
+  for (const e of data.edges) {
+    const from = e.source.replace(/^dbo\./, '');
+    const to = e.target.replace(/^dbo\./, '');
+    ensure(from); ensure(to);
+    if (from !== to) edges.push({ from, to });
+  }
+  const s = new Set();
+  return { nodes: Array.from(nodes.values()), edges: edges.filter(e => { const k = e.from+"→"+e.to; if (s.has(k)) return false; s.add(k); return true; }) };
+}
+
+/* ─── DAG Layout ─── */
+function layoutDAG(nodes, edges, collapsed) {
+  const vis = nodes.filter(n => !collapsed.has(n.type));
+  const vIds = new Set(vis.map(n => n.id));
+  const vEdges = edges.filter(e => vIds.has(e.from) && vIds.has(e.to));
+  const parents = new Map();
+  vis.forEach(n => parents.set(n.id, []));
+  vEdges.forEach(e => { if (parents.has(e.to)) parents.get(e.to).push(e.from); });
+
+  const layers = new Map(), done = new Set();
+  const nodeById = new Map(); vis.forEach(n => nodeById.set(n.id, n));
+  /* Fixed layer assignments: external(0) → brz/ref(1) → slv/gld/other(auto) */
+  const FIXED_LAYERS = {other: 0, orphan: 0, brz: 1, ref: 1};
+  function assign(id) {
+    if (done.has(id)) return layers.get(id) || 0;
+    done.add(id);
+    const nd = nodeById.get(id);
+    const fixedLayer = nd ? FIXED_LAYERS[nd.type] : undefined;
+    if (fixedLayer !== undefined) { layers.set(id, fixedLayer); return fixedLayer; }
+    const p = parents.get(id) || [];
+    if (!p.length) { layers.set(id, 0); return 0; }
+    let mx = 0; for (const pp of p) mx = Math.max(mx, assign(pp) + 1);
+    layers.set(id, mx); return mx;
+  }
+  vis.forEach(n => assign(n.id));
+
+  const groups = new Map();
+  vis.forEach(n => { const l = layers.get(n.id)||0; if (!groups.has(l)) groups.set(l,[]); groups.get(l).push(n); });
+  const sorted = Array.from(groups.keys()).sort((a,b) => a-b);
+  const pos = new Map();
+
+  sorted.forEach(l => {
+    groups.get(l).sort((a,b) => {
+      const o = {other:0,orphan:0,brz:1,ref:2,slv:3,gld:4,dq:5};
+      const d = (o[a.type]||9)-(o[b.type]||9);
+      return d!==0 ? d : a.name.localeCompare(b.name);
+    });
+  });
+
+  for (let i=0;i<8;i++) {
+    for (let li=1;li<sorted.length;li++) {
+      const g = groups.get(sorted[li]), prev = groups.get(sorted[li-1]);
+      const po = new Map(); prev.forEach((n,i) => po.set(n.id,i));
+      g.forEach(n => {
+        const p = (parents.get(n.id)||[]).filter(pp => po.has(pp));
+        if (p.length) pos.set(n.id, p.reduce((s,pp) => s+po.get(pp),0)/p.length);
+      });
+      g.sort((a,b) => (pos.get(a.id)||0)-(pos.get(b.id)||0));
+    }
+  }
+
+  const NW=220,NH=36,HG=100,VG=12;
+  const np = new Map();
+  sorted.forEach(l => {
+    const g = groups.get(l), th = g.length*NH+(g.length-1)*VG, sy = -th/2;
+    g.forEach((n,i) => { np.set(n.id, {x:l*(NW+HG), y:sy+i*(NH+VG), w:NW, h:NH, node:n}); });
+  });
+  return { nodePositions:np, visibleEdges:vEdges, visibleNodes:vis };
+}
+
+/* ─── Components ─── */
+function EdgePath({from,to,color,highlight,dim}) {
+  const x1=from.x+from.w+2,y1=from.y+from.h/2,x2=to.x-2,y2=to.y+to.h/2,mx=(x1+x2)/2;
+  return <g>
+    <path d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none"
+      stroke={highlight?color:"#334155"} strokeWidth={highlight?2:1}
+      strokeDasharray={highlight?"6 3":"4 3"}
+      strokeOpacity={dim?0.06:highlight?0.8:0.25} style={{transition:"all 0.2s"}} />
+    {highlight && <polygon points={`${x2},${y2} ${x2-6},${y2-3.5} ${x2-6},${y2+3.5}`} fill={color} opacity={0.8}/>}
+  </g>;
+}
+
+function NodeBox({pos,isFocus,isConn,isDim,isSH,isSD,onHover,onSelect}) {
+  const cfg = TYPE_CONFIG[pos.node.type]||TYPE_CONFIG.model;
+  const tn = pos.node.name.length>28 ? pos.node.name.slice(0,26)+"..." : pos.node.name;
+  let bg="#111827",border="#1e293b",bw=1,op=1,tc="#cbd5e1";
+  if (isFocus) {bg=cfg.color+"1a";border=cfg.color;bw=2;tc="#f1f5f9";}
+  else if (isConn) {border=cfg.color+"66";tc="#e2e8f0";}
+  else if (isSH) {bg=cfg.color+"18";border=cfg.color;bw=2;}
+  if (isDim||isSD) op=0.15;
+  return <g className="nd" style={{cursor:"pointer"}} onMouseEnter={onHover} onMouseLeave={()=>onHover(null)} onClick={onSelect}>
+    <rect x={pos.x+1} y={pos.y+1} width={pos.w} height={pos.h} rx={8} fill="#000" opacity={op*0.2}/>
+    <rect x={pos.x} y={pos.y} width={pos.w} height={pos.h} rx={8} fill={bg} stroke={border} strokeWidth={bw} opacity={op} style={{transition:"all 0.2s"}}/>
+    <circle cx={pos.x+14} cy={pos.y+pos.h/2} r={4} fill={cfg.color} opacity={op*0.85}/>
+    <text x={pos.x+26} y={pos.y+pos.h/2+1} dominantBaseline="middle" fill={tc} fontSize={11} fontFamily="'JetBrains Mono',monospace" opacity={op}>{tn}</text>
+  </g>;
+}
+
+function DiagramCanvas({graph,collapsed,searchTerm,activeFilter}) {
+  const {nodePositions:np,visibleEdges:ve,visibleNodes:vn} = useMemo(() => {
+    let fn = graph.nodes;
+    if (activeFilter && activeFilter!=="all") {
+      const rel = new Set();
+      graph.nodes.forEach(n => {if(n.type===activeFilter)rel.add(n.id);});
+      graph.edges.forEach(e => {if(rel.has(e.from))rel.add(e.to);if(rel.has(e.to))rel.add(e.from);});
+      fn = graph.nodes.filter(n => rel.has(n.id));
+    }
+    return layoutDAG(fn, graph.edges, collapsed);
+  }, [graph,collapsed,activeFilter]);
+
+  const [hov,setHov] = useState(null);
+  const [sel,setSel] = useState(null);
+  const ref = useRef(null);
+  const [pan,setPan] = useState({x:0,y:0});
+  const [zoom,setZoom] = useState(1);
+  const [drag,setDrag] = useState(false);
+  const ds = useRef(null);
+  const fid = sel||hov;
+
+  const conn = useMemo(() => {
+    if (!fid) return new Set();
+    const ids = new Set([fid]);
+    let q=[fid]; while(q.length){const c=q.shift();ve.forEach(e=>{if(e.to===c&&!ids.has(e.from)){ids.add(e.from);q.push(e.from);}});}
+    q=[fid]; while(q.length){const c=q.shift();ve.forEach(e=>{if(e.from===c&&!ids.has(e.to)){ids.add(e.to);q.push(e.to);}});}
+    return ids;
+  }, [fid,ve]);
+
+  const sm = useMemo(() => {
+    if (!searchTerm) return null;
+    const s=searchTerm.toLowerCase(), ids=new Set();
+    vn.forEach(n=>{if(n.name.toLowerCase().includes(s))ids.add(n.id);});
+    return ids.size>0?ids:null;
+  }, [searchTerm,vn]);
+
+  const fitView = useCallback(() => {
+    if (!ref.current||np.size===0) return;
+    let a=Infinity,b=Infinity,c=-Infinity,d=-Infinity;
+    np.forEach(p=>{a=Math.min(a,p.x);b=Math.min(b,p.y);c=Math.max(c,p.x+p.w);d=Math.max(d,p.y+p.h);});
+    const gw=c-a+120,gh=d-b+120,cw=ref.current.clientWidth,ch=ref.current.clientHeight;
+    const fz=Math.min(cw/gw,ch/gh,1.2);
+    setZoom(fz);setPan({x:cw/2-((a+c)/2)*fz,y:ch/2-((b+d)/2)*fz});
+  },[np]);
+
+  useEffect(()=>{fitView();},[fitView,graph,collapsed,activeFilter]);
+  useEffect(()=>{
+    const el=ref.current;if(!el)return;
+    const h=e=>{e.preventDefault();setZoom(z=>Math.max(0.08,Math.min(5,z*(e.deltaY>0?0.93:1.07))));};
+    el.addEventListener("wheel",h,{passive:false});return()=>el.removeEventListener("wheel",h);
+  },[]);
+
+  return <div ref={ref} style={{flex:1,overflow:"hidden",cursor:drag?"grabbing":"grab",position:"relative",background:"#0a0f1a"}}
+    onMouseDown={e=>{if(e.target.closest(".nd"))return;setDrag(true);ds.current={x:e.clientX-pan.x,y:e.clientY-pan.y};}}
+    onMouseMove={e=>{if(drag)setPan({x:e.clientX-ds.current.x,y:e.clientY-ds.current.y});}}
+    onMouseUp={()=>setDrag(false)} onMouseLeave={()=>setDrag(false)}
+    onClick={e=>{if(!e.target.closest(".nd"))setSel(null);}}>
+
+    <div style={{position:"absolute",bottom:16,right:16,display:"flex",gap:4,zIndex:10}}>
+      {[{l:"+",f:()=>setZoom(z=>Math.min(5,z*1.25))},{l:"\u2212",f:()=>setZoom(z=>Math.max(0.08,z/1.25))},{l:"Fit",f:fitView}].map(b=>
+        <button key={b.l} onClick={b.f} style={{width:b.l==="Fit"?40:32,height:32,background:"#111827",border:"1px solid #1e293b",borderRadius:6,color:"#64748b",fontSize:b.l==="Fit"?11:15,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>{b.l}</button>
+      )}
+    </div>
+
+    {sel&&np.has(sel)&&<div style={{position:"absolute",bottom:16,left:16,background:"#111827ee",border:"1px solid #1e293b",borderRadius:8,padding:"10px 14px",fontSize:11,color:"#94a3b8",zIndex:10,maxWidth:300}}>
+      <div style={{color:TYPE_CONFIG[np.get(sel).node.type]?.color,fontWeight:700,marginBottom:4}}>{np.get(sel).node.name}</div>
+      <div>Type: {np.get(sel).node.type} · Up: {ve.filter(e=>e.to===sel).length} · Down: {ve.filter(e=>e.from===sel).length}</div>
+    </div>}
+
+    <svg style={{position:"absolute",left:0,top:0,width:"100%",height:"100%"}}>
+      <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+        {ve.map((e,i)=>{const f=np.get(e.from),t=np.get(e.to);if(!f||!t)return null;const hl=fid&&conn.has(e.from)&&conn.has(e.to);return<EdgePath key={i} from={f} to={t} color={(TYPE_CONFIG[t.node?.type]||TYPE_CONFIG.model).color} highlight={hl} dim={fid&&!hl}/>;})}
+        {Array.from(np.entries()).map(([id,pos])=>
+          <NodeBox key={id} pos={pos} isFocus={fid===id} isConn={conn.has(id)} isDim={fid&&!conn.has(id)} isSH={sm?.has(id)} isSD={sm&&!sm.has(id)}
+            onHover={v=>setHov(v===null?null:id)} onSelect={e=>{e.stopPropagation();setSel(sel===id?null:id);}}/>
+        )}
+      </g>
+    </svg>
+  </div>;
+}
+
+/* ─── AI Chat ─── */
+function buildCtx(graph) {
+  const bt={},deps={};
+  graph.nodes.forEach(n=>{if(!bt[n.type])bt[n.type]=[];bt[n.type].push(n.name);});
+  graph.edges.forEach(e=>{if(!deps[e.to])deps[e.to]=[];deps[e.to].push(e.from);});
+  let c=`Lineage: ${graph.nodes.length} nodes, ${graph.edges.length} edges\n\nBy type:\n`;
+  for(const[t,ns]of Object.entries(bt))c+=`  ${t}: ${ns.join(", ")}\n`;
+  c+=`\nDeps (target <- sources):\n`;
+  for(const[t,ss]of Object.entries(deps))c+=`  ${t} <- ${ss.join(", ")}\n`;
+  const hp=new Set(graph.edges.map(e=>e.to)),hc=new Set(graph.edges.map(e=>e.from));
+  c+=`\nRoots: ${graph.nodes.filter(n=>!hp.has(n.id)).map(n=>n.name).join(", ")}\n`;
+  c+=`Leaves: ${graph.nodes.filter(n=>!hc.has(n.id)).map(n=>n.name).join(", ")}\n`;
+  return c;
+}
+
+function ChatPanel({graph,onClose}) {
+  const [msgs,setMsgs]=useState([{role:"assistant",content:"Try asking:\n\u2022 \"Which tables feed into gld_fact_invoice_weekly?\"\n\u2022 \"Which tables have no downstream?\"\n\u2022 \"Trace the full lineage of slv_calendar\""}]);
+  const [inp,setInp]=useState("");
+  const [img,setImg]=useState(null); // {base64, preview}
+  const [key,setKey]=useState(localStorage.getItem('groq_key')||"");
+  const [showKey,setShowKey]=useState(!localStorage.getItem('groq_key'));
+  const [loading,setLoading]=useState(false);
+  const endRef=useRef(null);
+
+  useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"});},[msgs]);
+
+  const handlePaste=(e)=>{
+    const items=e.clipboardData?.items;
+    if(!items)return;
+    for(const item of items){
+      if(item.type.startsWith('image/')){
+        e.preventDefault();
+        const file=item.getAsFile();
+        const reader=new FileReader();
+        reader.onload=(ev)=>{
+          const base64=ev.target.result;
+          setImg({base64,preview:base64});
+        };
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  };
+
+  const send = async()=>{
+    if((!inp.trim()&&!img)||loading||!key.trim())return;
+    const um=inp.trim();setInp("");
+    const hasImage=!!img;
+    const userContent=hasImage?[
+      ...(um?[{type:"text",text:um}]:[{type:"text",text:"Describe this image in the context of data lineage."}]),
+      {type:"image_url",image_url:{url:img.base64}}
+    ]:um;
+    const displayContent=um||(hasImage?"[Image]":"");
+    const userMsg={role:"user",content:userContent,_display:displayContent,_img:img?.preview};
+    setImg(null);
+    const nm=[...msgs,userMsg];setMsgs(nm);setLoading(true);
+    try{
+      const ctx=buildCtx(graph);
+      const sys=`You are a data lineage assistant.\n\n${ctx}\n\nAnswer concisely. Use node names. Trace upstream/downstream chains. Answer in user's language. If the user pastes an image, analyze it for any data lineage information (tables, columns, relationships, SQL, notebook code).`;
+      const model=hasImage?"meta-llama/llama-4-scout-17b-16e-instruct":"llama-3.3-70b-versatile";
+      const am=nm.filter((m,i)=>!(i===0&&m.role==="assistant")).map(m=>({role:m.role,content:m.content}));
+      const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{
+        method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${key.trim()}`},
+        body:JSON.stringify({model,messages:[{role:"system",content:sys},...am],max_tokens:1000,temperature:0.3})
+      });
+      if(!r.ok){const e=await r.json().catch(()=>({}));
+        if(r.status===401){setMsgs(p=>[...p,{role:"assistant",content:"Invalid API key."}]);setShowKey(true);}
+        else setMsgs(p=>[...p,{role:"assistant",content:`Error: ${e.error?.message||r.status}`}]);
+        setLoading(false);return;
+      }
+      const d=await r.json();
+      setMsgs(p=>[...p,{role:"assistant",content:d.choices?.[0]?.message?.content||"No response."}]);
+    }catch(e){setMsgs(p=>[...p,{role:"assistant",content:"Connection error."}]);}
+    setLoading(false);
+  };
+
+  const ms={alignSelf:"flex-start",maxWidth:"90%",background:"#111827",border:"1px solid #1e293b",borderRadius:"12px 12px 12px 4px",padding:"8px 12px",fontSize:11,lineHeight:1.6,color:"#94a3b8",whiteSpace:"pre-wrap",wordBreak:"break-word"};
+
+  return <div style={{width:360,borderLeft:"1px solid #151d2e",background:"#0d1322",display:"flex",flexDirection:"column",flexShrink:0}}>
+    <div style={{height:44,borderBottom:"1px solid #151d2e",display:"flex",alignItems:"center",padding:"0 14px",gap:8}}>
+      <span style={{fontSize:14}}>{"\u2726"}</span>
+      <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>AI Assistant</span>
+      <span style={{fontSize:9,color:"#0ea5e9",background:"#0ea5e911",padding:"2px 6px",borderRadius:4,border:"1px solid #0ea5e933"}}>Groq</span>
+      <div style={{flex:1}}/>
+      {key&&<button onClick={()=>setShowKey(!showKey)} style={{background:"none",border:"none",color:"#22c55e",cursor:"pointer",fontSize:10}}>{"\u25CF"} Connected</button>}
+      <button onClick={onClose} style={{background:"none",border:"none",color:"#475569",cursor:"pointer",fontSize:14}}>{"\u2715"}</button>
+    </div>
+
+    {showKey&&<div style={{padding:"10px 14px",borderBottom:"1px solid #151d2e",background:"#0a0f1a"}}>
+      <div style={{fontSize:10,color:"#475569",marginBottom:6}}>Groq API Key — <a href="https://console.groq.com/keys" target="_blank">Get a free key</a></div>
+      <div style={{display:"flex",gap:6}}>
+        <input type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder="gsk_..." style={{flex:1,padding:"6px 10px",background:"#111827",border:"1px solid #1e293b",borderRadius:6,color:"#cbd5e1",fontSize:11,outline:"none"}}/>
+        <button onClick={()=>{if(key.trim()){localStorage.setItem('groq_key',key.trim());setShowKey(false);}}} style={{padding:"6px 12px",background:key?"#0ea5e922":"#1e293b",border:`1px solid ${key?"#0ea5e944":"#1e293b"}`,borderRadius:6,color:key?"#0ea5e9":"#475569",fontSize:11,fontWeight:700,cursor:"pointer"}}>Save</button>
+      </div>
+      <div style={{fontSize:9,color:"#334155",marginTop:4}}>Key is only stored in this session and never sent anywhere except Groq.</div>
+    </div>}
+
+    <div style={{flex:1,overflow:"auto",padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}}>
+      {msgs.map((m,i)=><div key={i} style={{...ms,alignSelf:m.role==="user"?"flex-end":"flex-start",background:m.role==="user"?"#1e3a5f":"#111827",border:`1px solid ${m.role==="user"?"#2563eb33":"#1e293b"}`,borderRadius:m.role==="user"?"12px 12px 4px 12px":"12px 12px 12px 4px",color:m.role==="user"?"#93c5fd":"#94a3b8"}}>
+        {m._img&&<img src={m._img} style={{maxWidth:'100%',borderRadius:6,marginBottom:4}} alt="pasted"/>}
+        {m._display||m.content}
+      </div>)}
+      {loading&&<div style={{...ms,color:"#475569"}}><span style={{animation:"pulse 1.5s infinite"}}>Thinking...</span></div>}
+      <div ref={endRef}/>
+    </div>
+
+    <div style={{borderTop:"1px solid #151d2e",padding:"10px 14px"}}>
+      {img&&<div style={{marginBottom:6,position:'relative',display:'inline-block'}}>
+        <img src={img.preview} style={{maxHeight:80,borderRadius:6,border:'1px solid #1e293b'}} alt="preview"/>
+        <button onClick={()=>setImg(null)} style={{position:'absolute',top:-4,right:-4,width:16,height:16,borderRadius:'50%',background:'#ef4444',border:'none',color:'#fff',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',lineHeight:1}}>{"\u2715"}</button>
+      </div>}
+      <div style={{display:"flex",gap:8}}>
+        <input value={inp} onChange={e=>setInp(e.target.value)} onPaste={handlePaste} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}} placeholder={key?(img?"Add a message or just send...":"Ask about lineage... (paste image with Ctrl+V)"):"Enter API key first..."} disabled={!key} style={{flex:1,padding:"8px 12px",background:"#0a0f1a",border:"1px solid #1e293b",borderRadius:8,color:"#cbd5e1",fontSize:11,outline:"none",opacity:key?1:0.4}}/>
+        <button onClick={send} disabled={loading||(!inp.trim()&&!img)||!key} style={{padding:"8px 14px",background:loading?"#1e293b":"#0ea5e922",border:"1px solid #0ea5e944",borderRadius:8,color:loading?"#475569":"#0ea5e9",fontSize:11,fontWeight:700,cursor:loading||!key?"default":"pointer"}}>Send</button>
+      </div>
+    </div>
+  </div>;
+}
+
+/* ─── CopyIcon ─── */
+function CopyIcon({size=14}) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+  </svg>;
+}
+
+const hB={padding:"5px 12px",fontSize:11,background:"#111827",border:"1px solid #1e293b",borderRadius:6,color:"#64748b",cursor:"pointer"};
+
+/* ─── App ─── */
+function App() {
+  const [graph,setGraph]=useState({nodes:[],edges:[]});
+  const [loadErr,setLoadErr]=useState(null);
+  const [liveStatus,setLiveStatus]=useState("loading"); /* loading | connected | fallback | error */
+
+  /* Load lineage data: injected JSON > /api/lineage > static fallback */
+  const fetchLive = useCallback(()=>{
+    setLiveStatus("loading");
+    /* Priority 1: data injected by Streamlit */
+    if(window.__LINEAGE_API_DATA__&&window.__LINEAGE_API_DATA__.nodes&&window.__LINEAGE_API_DATA__.nodes.length>0){
+      setGraph(apiJsonToGraph(window.__LINEAGE_API_DATA__));setLoadErr(null);setLiveStatus("connected");return;
+    }
+    /* Priority 2: /api/lineage (Flask backend) */
+    fetch("/api/lineage").then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}).then(data=>{
+      if(data.nodes&&data.nodes.length>0){
+        setGraph(apiJsonToGraph(data));setLoadErr(null);setLiveStatus("connected");
+      } else {
+        setLiveStatus("fallback"); throw new Error("empty");
+      }
+    }).catch(e=>{
+      /* Fallback: try static data or result.txt */
+      if(window.__LINEAGE_DATA__){
+        const nb=parseLineageText(window.__LINEAGE_DATA__);
+        if(Object.keys(nb).length>0){setGraph(lineageToGraph(nb));setLiveStatus("fallback");return;}
+      }
+      fetch("result.txt").then(r=>{if(!r.ok)throw new Error(r.status);return r.text();}).then(text=>{
+        const nb=parseLineageText(text);
+        if(Object.keys(nb).length>0){setGraph(lineageToGraph(nb));setLiveStatus("fallback");}
+        else {setLoadErr("No data available.");setLiveStatus("error");}
+      }).catch(()=>{
+        setLoadErr("Failed to load. Use Import to paste data.");
+        setLiveStatus("error");
+      });
+    });
+  },[]);
+
+  useEffect(()=>{fetchLive();},[fetchLive]);
+  const [showImp,setShowImp]=useState(false);
+  const [impTxt,setImpTxt]=useState("");
+  const [search,setSearch]=useState("");
+  const [showSrc,setShowSrc]=useState(false);
+  const [collapsed,setCollapsed]=useState(new Set());
+  const [filter,setFilter]=useState("all");
+  const [showChat,setShowChat]=useState(false);
+
+  const tc=useMemo(()=>{const c={};graph.nodes.forEach(n=>{c[n.type]=(c[n.type]||0)+1;});return c;},[graph]);
+
+  const load=()=>{
+    try{const p=JSON.parse(impTxt);if(p.nodes&&p.edges){setGraph(p);setShowImp(false);setImpTxt("");setLoadErr(null);return;}}catch{}
+    const nb=parseLineageText(impTxt);
+    if(Object.keys(nb).length>0){setGraph(lineageToGraph(nb));setShowImp(false);setImpTxt("");setLoadErr(null);}
+    else alert("Could not parse input.");
+  };
+
+  const exp=()=>{const b=new Blob([JSON.stringify(graph,null,2)],{type:"application/json"});const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download="lineage.json";a.click();URL.revokeObjectURL(u);};
+
+  const toggle=t=>{setCollapsed(p=>{const n=new Set(p);if(n.has(t))n.delete(t);else n.add(t);return n;});};
+
+  return <div style={{height:"100vh",display:"flex",flexDirection:"column",background:"#0a0f1a",color:"#cbd5e1"}}>
+    <div style={{height:44,borderBottom:"1px solid #151d2e",display:"flex",alignItems:"center",padding:"0 16px",gap:10,background:"#0d1322",flexShrink:0}}>
+      <svg width="16" height="16" viewBox="0 0 16 16" style={{opacity:0.5}}>
+        <circle cx="3" cy="8" r="2" fill="#3b82f6"/><circle cx="8" cy="4" r="2" fill="#a78bfa"/>
+        <circle cx="8" cy="12" r="2" fill="#f59e0b"/><circle cx="13" cy="8" r="2" fill="#22c55e"/>
+        <line x1="5" y1="8" x2="6" y2="5" stroke="#334155"/><line x1="5" y1="8" x2="6" y2="11" stroke="#334155"/>
+        <line x1="10" y1="4" x2="11" y2="7" stroke="#334155"/><line x1="10" y1="12" x2="11" y2="9" stroke="#334155"/>
+      </svg>
+      <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>Lineage</span>
+      <span style={{fontSize:10,color:"#475569"}}>{graph.nodes.length} nodes · {graph.edges.length} edges</span>
+      {false&&liveStatus==="connected"&&<span/>}
+      {false&&liveStatus==="fallback"&&<span/>}
+      {false&&liveStatus==="loading"&&<span/>}
+      <button onClick={fetchLive} title="Refresh from ODBC" style={{...hB,padding:"3px 8px",fontSize:10,color:"#22c55e",borderColor:"#22c55e33",background:"#22c55e11"}}>{"\u21BB"} Refresh ODBC</button>
+      <div style={{flex:1}}/>
+
+      <div style={{display:"flex",gap:4}}>
+        <button onClick={()=>setFilter("all")} style={{...hB,background:filter==="all"?"#1e293b":"transparent",border:filter==="all"?"1px solid #334155":"1px solid transparent",color:filter==="all"?"#cbd5e1":"#475569",fontSize:10,padding:"3px 8px"}}>All</button>
+        {Object.entries(TYPE_CONFIG).map(([t,cfg])=>{
+          const cnt=tc[t]||0;if(!cnt)return null;const isA=filter===t,isC=collapsed.has(t);
+          return<button key={t} onClick={()=>setFilter(isA?"all":t)} onContextMenu={e=>{e.preventDefault();toggle(t);}}
+            style={{padding:"3px 8px",fontSize:10,borderRadius:6,cursor:"pointer",background:isA?cfg.color+"22":"transparent",border:`1px solid ${isA?cfg.color+"55":"transparent"}`,color:isC?"#334155":cfg.color,textDecoration:isC?"line-through":"none",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{fontSize:8}}>{cfg.icon}</span>{cfg.label} ({cnt})
+          </button>;
+        })}
+      </div>
+
+      <div style={{width:1,height:20,background:"#1e293b",margin:"0 4px"}}/>
+      {showSrc&&<input autoFocus value={search} onChange={e=>setSearch(e.target.value)} placeholder="Filter nodes..." style={{width:160,padding:"4px 8px",background:"#111827",border:"1px solid #1e293b",borderRadius:5,color:"#cbd5e1",fontSize:11,outline:"none"}}/>}
+      <button onClick={()=>{setShowSrc(!showSrc);if(showSrc)setSearch("");}} style={{...hB,padding:"4px 8px"}}>{showSrc?"\u2715":"\u2315"}</button>
+      <button onClick={()=>setShowImp(!showImp)} style={{...hB,background:showImp?"#1e3a5f":"#111827",borderColor:showImp?"#3b82f6":"#1e293b",color:showImp?"#93c5fd":"#64748b"}}>Import</button>
+      <button onClick={exp} style={hB}>Export</button>
+      <button onClick={()=>setShowChat(!showChat)} style={{...hB,background:showChat?"#7c3aed22":"#111827",borderColor:showChat?"#7c3aed55":"#1e293b",color:showChat?"#a78bfa":"#64748b",fontWeight:700}}>{"\u2726"} AI</button>
+    </div>
+
+    {showImp&&<div style={{borderBottom:"1px solid #151d2e",background:"#0d1322",padding:"12px 16px",display:"flex",gap:10,flexShrink:0}}>
+      <textarea value={impTxt} onChange={e=>setImpTxt(e.target.value)} rows={5} placeholder={"Paste lineage output:\n\nnb_xxx\n  WRITES -> dbo.table\n  READS  <- dbo.table"} style={{flex:1,background:"#0a0f1a",border:"1px solid #1e293b",borderRadius:6,color:"#cbd5e1",padding:10,fontSize:11,resize:"vertical",outline:"none"}}/>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        <button onClick={load} style={{...hB,background:"#16a34a22",borderColor:"#16a34a55",color:"#4ade80",padding:"8px 16px",fontWeight:700}}>Load</button>
+        <button onClick={()=>setImpTxt("")} style={{...hB,padding:"8px 16px"}}>Clear</button>
+      </div>
+    </div>}
+
+    {loadErr&&graph.nodes.length===0&&<div style={{background:"#1e0a0a",border:"1px solid #7f1d1d",borderRadius:8,margin:"12px 16px",padding:"12px 16px",fontSize:11,color:"#fca5a5",flexShrink:0}}>
+      <div style={{fontWeight:700,marginBottom:4,color:"#f87171"}}>Failed to load lineage data</div>
+      <div>{loadErr}</div>
+      <div style={{marginTop:6,color:"#94a3b8"}}>Use <strong>Import</strong> to paste data manually.</div>
+    </div>}
+    {!loadErr&&graph.nodes.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",flex:1,color:"#475569",fontSize:12}}>
+      <span style={{animation:"pulse 1.5s infinite"}}>Loading from ODBC...</span>
+    </div>}
+    <div style={{flex:1,display:"flex",overflow:"hidden",display:graph.nodes.length===0&&!loadErr?"none":"flex"}}>
+      <DiagramCanvas graph={graph} collapsed={collapsed} searchTerm={search} activeFilter={filter}/>
+      {showChat&&<ChatPanel graph={graph} onClose={()=>setShowChat(false)}/>}
+    </div>
+  </div>;
+}
+
+ReactDOM.render(<App/>, document.getElementById("root"));
+</script>
+</body>
+</html>
