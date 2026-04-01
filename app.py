@@ -45,10 +45,12 @@ def get_connection():
         credential = DefaultAzureCredential()
 
     import pytds
+    import certifi
     return pytds.connect(
         dsn=FABRIC_SERVER,
         port=1433,
         database=FABRIC_DATABASE,
+        cafile=certifi.where(),
         access_token_callable=lambda: credential.get_token("https://database.windows.net/.default").token,
     )
 
