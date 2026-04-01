@@ -2,5 +2,3 @@ streamlit
 streamlit-cookies-controller
 pyodbc
 azure-identity
-certifi
-pyopenssl
