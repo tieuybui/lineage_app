@@ -1,9 +1,8 @@
-# Data Lineage Web App
+# Data Lineage – Streamlit App
 
 Interactive visualization of Supply Chain data lineage.  
-Reads real-time from `utl_pipeline_metadata` table via ODBC (Fabric SQL endpoint).
-
-![DAG layout: Raw → BRZ/REF → SLV → GLD]
+Reads real-time from `utl_pipeline_metadata` table via ODBC (Fabric SQL endpoint).  
+Built with Streamlit + Cytoscape DAG visualization.
 
 ---
 
@@ -12,27 +11,25 @@ Reads real-time from `utl_pipeline_metadata` table via ODBC (Fabric SQL endpoint
 | Requirement | How to get it |
 |---|---|
 | **Python 3.10+** | https://www.python.org/downloads/ |
-| **ODBC Driver 18 for SQL Server** | https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server |
-| **Azure CLI** (for authentication) | https://learn.microsoft.com/en-us/cli/azure/install-azure-cli |
+| **ODBC Driver 17 or 18 for SQL Server** | https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server |
+| **Azure CLI** (for local authentication) | https://learn.microsoft.com/en-us/cli/azure/install-azure-cli |
 
 ---
 
 ## Setup (one-time)
 
-### 1. Install ODBC Driver 18
+### 1. Install ODBC Driver
 
-Download and install from the link above. Verify it's installed:
+Download and install from the link above. Verify:
 
 ```
-python -c "import pyodbc; print([d for d in pyodbc.drivers() if '18' in d])"
+python -c "import pyodbc; print([d for d in pyodbc.drivers() if 'SQL Server' in d])"
 ```
-
-Expected output: `['ODBC Driver 18 for SQL Server']`
 
 ### 2. Create virtual environment
 
 ```
-cd lineage_web
+cd lineage_app
 python -m venv .venv
 ```
 
@@ -48,52 +45,81 @@ Activate:
 pip install -r requirements.txt
 ```
 
-### 4. Login to Azure
+### 4. Configure secrets
+
+Copy the example file and fill in your values:
+
+```
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+Edit `.streamlit/secrets.toml`:
+
+```toml
+FABRIC_SERVER = "your-server.datawarehouse.fabric.microsoft.com"
+FABRIC_DATABASE = "your_database"
+
+# Service Principal (optional – for Streamlit Cloud)
+AZURE_TENANT_ID = ""
+AZURE_CLIENT_ID = ""
+AZURE_CLIENT_SECRET = ""
+```
+
+### 5. Login to Azure (local development)
 
 ```
 az login
 ```
 
-This opens a browser window. Sign in with your Ashley Furniture account.  
-The app uses `DefaultAzureCredential` which picks up your `az login` session automatically.
+Sign in with your account. The app uses `DefaultAzureCredential` which picks up your `az login` session automatically.  
+On Streamlit Cloud, use Service Principal credentials in secrets instead.
 
 ---
 
 ## Run
 
 ```
-python app.py
+streamlit run app.py
 ```
 
-Open **http://127.0.0.1:5000** in your browser.
+The app opens automatically at **http://localhost:8501**.
+
+---
+
+## Deploy on Streamlit Cloud
+
+1. Push repo to GitHub
+2. Create app on [share.streamlit.io](https://share.streamlit.io)
+3. `packages.txt` already includes `unixodbc-dev` (required for pyodbc on Linux)
+4. Add secrets via **Settings > Secrets** (same format as `secrets.toml`)
 
 ---
 
 ## Features
 
-- **Real-time ODBC**: Reads lineage from `utl_pipeline_metadata` on each load
+- **Real-time ODBC**: Reads lineage from `utl_pipeline_metadata` (cached 5 minutes)
 - **DAG visualization**: Left-to-right flow: Raw → BRZ/REF → SLV → GLD
 - **Click a node**: Highlights full upstream/downstream chain
-- **Filter by layer**: Click layer buttons in the header (BRZ, SLV, GLD, etc.)
-- **Search**: Click the search icon to filter nodes by name
-- **Refresh ODBC**: Click to reload data from Fabric
-- **Import**: Paste lineage text manually
-- **Extract**: Pull notebook definitions directly from Fabric API (browser auth)
-- **AI Chat**: Ask questions about lineage (requires free Groq API key)
-- **Export**: Download lineage as JSON
+- **Filter by layer**: Click layer buttons (BRZ, SLV, GLD, etc.)
+- **Search**: Filter nodes by name
+- **Auto-detect ODBC driver**: Supports both Driver 17 and 18
 
 ---
 
-## Configuration
+## File Structure
 
-Edit `app.py` lines 21-22 if your Fabric endpoint or database differs:
-
-```python
-FABRIC_SERVER = "your-endpoint.datawarehouse.fabric.microsoft.com"
-DATABASE      = "SupplyChain_Lakehouse"
 ```
-
-To find your SQL endpoint: Fabric Portal → Workspace → Lakehouse → Settings → SQL analytics endpoint.
+lineage_app/
+  app.py                        # Streamlit app (ODBC + iframe rendering)
+  requirements.txt              # Python dependencies
+  packages.txt                  # System packages for Streamlit Cloud
+  README.md                     # This file
+  .streamlit/
+    config.toml                 # Streamlit config (headless mode)
+    secrets.toml.example        # Template for secrets
+  templates/
+    lineage.html                # React UI (Cytoscape DAG visualization)
+```
 
 ---
 
@@ -102,20 +128,7 @@ To find your SQL endpoint: Fabric Portal → Workspace → Lakehouse → Setting
 | Problem | Solution |
 |---|---|
 | `No module named 'pyodbc'` | Run `pip install -r requirements.txt` |
-| `ODBC Driver 18 not found` | Install ODBC Driver 18 (see Prerequisites) |
+| `ODBC Driver not found` | Install ODBC Driver 17 or 18 (see Prerequisites) |
 | `DefaultAzureCredential failed` | Run `az login` and try again |
-| Page shows "Loading from ODBC..." forever | Check that `az login` is done and Fabric endpoint is reachable |
-| `Connection refused` on http://127.0.0.1:5000 | Make sure `python app.py` is running in a terminal |
-
----
-
-## File Structure
-
-```
-lineage_web/
-  app.py                  # Flask backend (ODBC connection + JSON API)
-  requirements.txt        # Python dependencies
-  README.md               # This file
-  templates/
-    lineage.html          # React UI (Cytoscape DAG visualization)
-```
+| Toast "Could not connect to Fabric" | Check secrets config and that Fabric endpoint is reachable |
+| App shows but no data | Verify `FABRIC_SERVER` and `FABRIC_DATABASE` in secrets |

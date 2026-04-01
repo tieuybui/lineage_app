@@ -1,3 +1,5 @@
 streamlit
 pyodbc
 azure-identity
+certifi
+pyopenssl
