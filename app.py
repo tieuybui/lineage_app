@@ -89,10 +89,14 @@ if not check_login():
 
 # Hide Streamlit chrome for full-screen experience
 st.markdown("""<style>
-    #MainMenu, header, footer, .stDeployButton, [data-testid="stToolbar"] {display:none !important;}
-    .stMainBlockContainer {padding:0 !important; max-width:100% !important;}
-    iframe {border:none !important;}
-
+    #MainMenu, header, footer, .stDeployButton, [data-testid="stToolbar"],
+    [data-testid="stStatusWidget"] {display:none !important;}
+    .stAppViewContainer, .stMainBlockContainer, [data-testid="stVerticalBlock"],
+    .stElementContainer {padding:0 !important; margin:0 !important; max-width:100% !important;}
+    .stMainBlockContainer {padding-top:0 !important; padding-bottom:0 !important;}
+    .stApp {margin:0 !important;}
+    .stMain {padding:0 !important;}
+    iframe {border:none !important; width:100vw !important; height:100vh !important; position:fixed !important; top:0 !important; left:0 !important;}
 </style>""", unsafe_allow_html=True)
 
 # --- Config from secrets ---
@@ -208,4 +212,4 @@ if lineage_data:
     )
 
 # --- Render ---
-components.html(html_content, height=900, scrolling=False)
+components.html(html_content, height=0, scrolling=False)
