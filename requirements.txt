@@ -2,3 +2,4 @@ streamlit
 python-tds
 azure-identity
 certifi
+pyopenssl
