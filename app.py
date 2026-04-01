@@ -35,16 +35,28 @@ def _make_token(email: str, password: str) -> str:
     return hashlib.sha256(f"lineage:{email}:{password}".encode()).hexdigest()
 
 
-def check_login():
-    """Show login form and verify credentials. Persists auth via browser cookie."""
-    if st.session_state.get("authenticated"):
-        return True
-
-    # Check saved cookie
+def _get_expected_token():
     correct_email = st.secrets.get("LOGIN_EMAIL", "")
     correct_password = st.secrets.get("LOGIN_PASSWORD", "")
-    expected_token = _make_token(correct_email, correct_password)
+    return correct_email, correct_password, _make_token(correct_email, correct_password)
 
+
+def check_login():
+    """Show login form and verify credentials. Persists auth via browser cookie."""
+    correct_email, correct_password, expected_token = _get_expected_token()
+
+    # Already authenticated this session → ensure cookie is persisted
+    if st.session_state.get("authenticated"):
+        saved_token = cookie_controller.get(AUTH_COOKIE_NAME)
+        if not saved_token or str(saved_token) != expected_token:
+            cookie_controller.set(
+                AUTH_COOKIE_NAME,
+                expected_token,
+                expires=datetime.now() + timedelta(days=AUTH_COOKIE_DAYS),
+            )
+        return True
+
+    # Check saved cookie from previous session
     saved_token = cookie_controller.get(AUTH_COOKIE_NAME)
     if saved_token and hmac.compare_digest(str(saved_token), expected_token):
         st.session_state["authenticated"] = True
@@ -66,11 +78,6 @@ def check_login():
                     and hmac.compare_digest(password, correct_password)
                 ):
                     st.session_state["authenticated"] = True
-                    cookie_controller.set(
-                        AUTH_COOKIE_NAME,
-                        expected_token,
-                        expires=datetime.now() + timedelta(days=AUTH_COOKIE_DAYS),
-                    )
                     st.rerun()
                 else:
                     st.error("Email hoặc mật khẩu không đúng.")
