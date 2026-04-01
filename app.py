@@ -15,19 +15,42 @@ Deploy on Streamlit Cloud:
 import json
 import struct
 import hmac
+import hashlib
+from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_cookies_controller import CookieController
 from pathlib import Path
 
 st.set_page_config(page_title="Data Lineage", layout="wide", initial_sidebar_state="collapsed")
 
+cookie_controller = CookieController()
 
-# --- Login ---
+AUTH_COOKIE_NAME = "lineage_auth_token"
+AUTH_COOKIE_DAYS = 30
+
+
+def _make_token(email: str, password: str) -> str:
+    """Create a deterministic auth token from credentials."""
+    return hashlib.sha256(f"lineage:{email}:{password}".encode()).hexdigest()
+
+
 def check_login():
-    """Show login form and verify credentials from secrets."""
+    """Show login form and verify credentials. Persists auth via browser cookie."""
     if st.session_state.get("authenticated"):
         return True
 
+    # Check saved cookie
+    correct_email = st.secrets.get("LOGIN_EMAIL", "")
+    correct_password = st.secrets.get("LOGIN_PASSWORD", "")
+    expected_token = _make_token(correct_email, correct_password)
+
+    saved_token = cookie_controller.get(AUTH_COOKIE_NAME)
+    if saved_token and hmac.compare_digest(str(saved_token), expected_token):
+        st.session_state["authenticated"] = True
+        return True
+
+    # Show login form
     with st.container():
         st.markdown("<h2 style='text-align:center; margin-top:15vh;'>🔐 Data Lineage Login</h2>", unsafe_allow_html=True)
         _, col2, _ = st.columns([1, 1, 1])
@@ -38,13 +61,16 @@ def check_login():
                 submitted = st.form_submit_button("Login", use_container_width=True)
 
             if submitted:
-                correct_email = st.secrets.get("LOGIN_EMAIL", "")
-                correct_password = st.secrets.get("LOGIN_PASSWORD", "")
                 if (
                     hmac.compare_digest(email.strip(), correct_email)
                     and hmac.compare_digest(password, correct_password)
                 ):
                     st.session_state["authenticated"] = True
+                    cookie_controller.set(
+                        AUTH_COOKIE_NAME,
+                        expected_token,
+                        expires=datetime.now() + timedelta(days=AUTH_COOKIE_DAYS),
+                    )
                     st.rerun()
                 else:
                     st.error("Email hoặc mật khẩu không đúng.")
