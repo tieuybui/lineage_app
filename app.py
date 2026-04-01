@@ -44,14 +44,12 @@ def get_connection():
     else:
         credential = DefaultAzureCredential()
 
-    token = credential.get_token("https://database.windows.net/.default").token
-
     import pytds
     return pytds.connect(
         dsn=FABRIC_SERVER,
         port=1433,
         database=FABRIC_DATABASE,
-        auth=pytds.login.AzureAuth(token),
+        access_token_callable=lambda: credential.get_token("https://database.windows.net/.default").token,
     )
 
 
