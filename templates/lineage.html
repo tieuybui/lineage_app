@@ -433,11 +433,13 @@ function App() {
   /* Refresh: reload the Streamlit page to re-fetch from Fabric */
   const fetchLive = useCallback(()=>{
     setLiveStatus("loading");
+    /* Navigate parent to ?refresh to clear cache and reload */
     try {
-      var u = new URL(window.parent.location.href);
-      u.searchParams.set("refresh", Date.now());
-      window.parent.location.href = u.toString();
-    } catch(e) { loadInjectedData(); }
+      var loc = window.parent.location;
+      loc.href = loc.pathname + "?refresh=" + Date.now();
+    } catch(e1) {
+      try { window.top.location.reload(); } catch(e2) { loadInjectedData(); }
+    }
   },[loadInjectedData]);
 
   useEffect(()=>{loadInjectedData();},[loadInjectedData]);
@@ -475,7 +477,6 @@ function App() {
       {false&&liveStatus==="connected"&&<span/>}
       {false&&liveStatus==="fallback"&&<span/>}
       {false&&liveStatus==="loading"&&<span/>}
-      <button onClick={fetchLive} title="Refresh from ODBC" style={{...hB,padding:"3px 8px",fontSize:10,color:"#22c55e",borderColor:"#22c55e33",background:"#22c55e11"}}>{"\u21BB"} Refresh ODBC</button>
       <div style={{flex:1}}/>
 
       <div style={{display:"flex",gap:4}}>
